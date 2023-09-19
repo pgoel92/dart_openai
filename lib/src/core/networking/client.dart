@@ -1,6 +1,7 @@
 import "dart:async";
 import "dart:convert";
-import "dart:io";
+import "dart:io" hide HttpRequest;
+import "dart:html" hide File;
 import "package:dart_openai/src/core/utils/extensions.dart";
 // ignore: unused_import
 import "package:dart_openai/src/core/utils/http_client_web.dart"
@@ -145,9 +146,8 @@ abstract class OpenAINetworkingClient {
     final httpMethod = OpenAIStrings.getMethod;
 
     final request = http.Request(httpMethod, uri);
-
     request.headers.addAll(HeadersBuilder.build());
-
+    
     Future<void> close() {
       return Future.wait([
         Future.delayed(Duration.zero, clientForUse.close),
@@ -241,6 +241,7 @@ abstract class OpenAINetworkingClient {
   static Stream<T> postStream<T>({
     required String to,
     required T Function(Map<String, dynamic>) onSuccess,
+    void Function()? onMessageDone,
     required Map<String, dynamic> body,
     http.Client? client,
   }) {
@@ -251,90 +252,67 @@ abstract class OpenAINetworkingClient {
 
       final uri = Uri.parse(to);
 
-      final headers = HeadersBuilder.build();
-
       final httpMethod = OpenAIStrings.postMethod;
 
-      final request = http.Request(httpMethod, uri);
-
-      request.headers.addAll(headers);
-
-      request.body = jsonEncode(body);
-
-      Future<void> close() {
-        return Future.wait([
-          if (client == null) Future.delayed(Duration.zero, clientForUse.close),
-          controller.close(),
-        ]);
-      }
-
-      OpenAILogger.logStartRequest(to);
-      clientForUse.send(request).then(
-        (respond) {
-          OpenAILogger.startReadStreamResponse();
-
-          final stream = respond.stream
-              .transform(utf8.decoder)
-              .transform(openAIChatStreamLineSplitter);
-
-          String respondData = "";
-          stream.listen(
-            (value) {
-              final data = value;
-              respondData += data;
-
-              final dataLines = data
-                  .split("\n")
-                  .where((element) => element.isNotEmpty)
-                  .toList();
-
-              for (String line in dataLines) {
-                if (line.startsWith(OpenAIStrings.streamResponseStart)) {
-                  final String data = line.substring(6);
-                  if (data.contains(OpenAIStrings.streamResponseEnd)) {
-                    OpenAILogger.streamResponseDone();
-
-                    return;
-                  }
-
-                  final decoded = jsonDecode(data) as Map<String, dynamic>;
-
-                  controller.add(onSuccess(decoded));
-
-                  continue;
-                }
-
-                Map<String, dynamic> decodedData = {};
-                try {
-                  decodedData = decodeToMap(respondData);
-                } catch (error) {/** ignore, data has not been received */}
-
-                if (doesErrorExists(decodedData)) {
-                  final error = decodedData[OpenAIStrings.errorFieldKey]
-                      as Map<String, dynamic>;
-                  var message = error[OpenAIStrings.messageFieldKey] as String;
-                  message = message.isEmpty ? jsonEncode(error) : message;
-                  final statusCode = respond.statusCode;
-                  final exception = RequestFailedException(message, statusCode);
-
-                  controller.addError(exception);
-                }
-              }
-            },
-            onDone: () {
-              close();
-            },
-            onError: (error, stackTrace) {
-              controller.addError(error, stackTrace);
-            },
-          );
-        },
-        onError: (error, stackTrace) {
-          controller.addError(error, stackTrace);
-        },
-      ).catchError((e) {
-        controller.addError(e);
+      final request = HttpRequest();
+      int progress = 0;
+      request.open('POST', uri.toString());
+      var headers = HeadersBuilder.build();
+      headers?.forEach((key, value) {
+        request.setRequestHeader(key, value);
       });
+      
+      request.addEventListener('progress', (event) {
+        final data = request.responseText!.substring(progress);
+        progress += data.length;
+        final dataLines = data
+              .split("\n")
+              .where((element) => element.isNotEmpty)
+              .toList();
+        
+        for (String line in dataLines) {
+          if (line.startsWith(OpenAIStrings.streamResponseStart)) {
+            final String data = line.substring(6);
+            if (data.startsWith(OpenAIStrings.streamResponseEnd)) {
+              onMessageDone!();
+              OpenAILogger.streamResponseDone();
+              return;
+            }
+            final decoded = jsonDecode(data) as Map<String, dynamic>; 
+            controller.add(onSuccess(decoded));
+          }
+
+          Map<String, dynamic> decodedData = {};
+          try {
+            decodedData = decodeToMap(request.responseText!);
+          } catch (error) {/** ignore, data has not been received */}
+
+          if (doesErrorExists(decodedData)) {
+            print(decodedData);
+            final error = decodedData[OpenAIStrings.errorFieldKey]
+                as Map<String, dynamic>;
+            var message = error[OpenAIStrings.messageFieldKey] as String;
+            message = message.isEmpty ? jsonEncode(error) : message;
+            final exception = RequestFailedException(message, 500);
+
+            controller.addError(exception);
+          }
+        }
+      });
+      
+      request.addEventListener('loadend', (event) {
+        request.abort();
+        controller.close();
+        OpenAILogger.log("Stream controller closed");
+      });
+
+      request.addEventListener('error', (event) {
+        controller.addError(
+          request.responseText ?? request.status ?? 'err',
+        );
+      });
+
+      request.send(jsonEncode(body));
     } catch (e) {
       controller.addError(e);
     }

@@ -170,6 +170,7 @@ interface class OpenAIChat implements OpenAIChatBase {
     Map<String, dynamic>? logitBias,
     String? user,
     http.Client? client,
+    void Function()? onMessageDone,
   }) {
     return OpenAINetworkingClient.postStream<OpenAIStreamChatCompletionModel>(
       to: BaseApiUrlBuilder.build(endpoint),
@@ -187,6 +188,7 @@ interface class OpenAIChat implements OpenAIChatBase {
         if (logitBias != null) "logit_bias": logitBias,
         if (user != null) "user": user,
       },
+      onMessageDone: onMessageDone,
       onSuccess: (Map<String, dynamic> response) {
         return OpenAIStreamChatCompletionModel.fromMap(response);
       },
